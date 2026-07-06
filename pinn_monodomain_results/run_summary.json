@@ -1,0 +1,32 @@
+{
+  "device": "mps",
+  "dtype": "float32",
+  "parameter_count": 66689,
+  "initial_condition_max_error": 0.0,
+  "best_epoch": 11735,
+  "best_losses": {
+    "total_loss": 5.545637395698577e-05,
+    "pde_loss": 5.282737038214691e-05,
+    "boundary_loss": 2.6290024379704846e-07
+  },
+  "npz_shapes": {
+    "x": [
+      201
+    ],
+    "y": [
+      201
+    ],
+    "mask": [
+      201,
+      201
+    ],
+    "times": [
+      6
+    ],
+    "u": [
+      6,
+      201,
+      201
+    ]
+  }
+}
