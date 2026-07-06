@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+*.np[cod]
 comparison_results/
 pinn_monodomain_results/
 old_files/
