@@ -3,6 +3,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -212,7 +213,7 @@ set_seed(42)
 hidden_layers = 5
 hidden_width = 128
 learning_rate = 1.0e-3
-epochs = 12000
+epochs = 120000
 min_learning_rate = 1.0e-5
 
 interior_batch = 8192  # 4096  # 2048
@@ -334,6 +335,10 @@ for epoch in range(1, epochs + 1):
             f"lr={row['learning_rate']:.2e}"
         )
 
+dir_path = Path("parametric_training")
+os.makedirs(dir_path, exist_ok=True)
+torch.save(best_state, dir_path / "pinn_parametric_best.pt")
+
 
 # %%
 epochs_history = [row["epoch"] for row in history]
@@ -355,7 +360,7 @@ plt.title("PINN training losses")
 plt.grid(True, which="both", alpha=0.3)
 plt.legend()
 plt.tight_layout()
-plt.show()
+plt.savefig(dir_path / "pinn_parametric_losses.png", dpi=300)
 
 
 # %%
