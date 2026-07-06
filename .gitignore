@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
-*.np[cod]
+*.npz
+*.msh
 comparison_results/
 pinn_monodomain_results/
 old_files/
