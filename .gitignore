@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+comparison_results/
+pinn_monodomain_results/
+monodomain_disk.h5
+monodomain_disk.msh
+monodomain_disk.xdmf
+monodomain_problem.tex
