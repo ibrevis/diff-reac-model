@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 *.npz
 *.msh
+*.yml
 comparison_results/
 pinn_monodomain_results/
 old_files/
