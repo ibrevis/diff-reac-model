@@ -35,7 +35,11 @@ def _triangles_from_vtk_cells(cells):
     return np.asarray(triangles, dtype=np.int32)
 
 
-def plot_solution(u, V, title):
+def plot_solution(u, V, title, save=False, filename=None, display=True):
+    """Plot a finite-element solution, with optional saving and display."""
+    if save and filename is None:
+        raise ValueError("filename must be provided when save=True")
+
     coords = V.tabulate_dof_coordinates()[:, :2]
     values = u.x.array.real
     cells, _, _ = vtk_mesh(V)
@@ -50,9 +54,16 @@ def plot_solution(u, V, title):
         cmap="viridis"
     )
 
-    fig.colorbar(contour, ax=ax, label="u")
-    ax.set_aspect("equal")
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    ax.set_title(title)
-    plt.show()
+    try:
+        fig.colorbar(contour, ax=ax, label="u")
+        ax.set_aspect("equal")
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.set_title(title)
+
+        if save:
+            fig.savefig(filename, bbox_inches="tight")
+        if display:
+            plt.show()
+    finally:
+        plt.close(fig)

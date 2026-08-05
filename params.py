@@ -9,7 +9,7 @@ dt = T / num_steps
 theta = 1.0      # 1.0 = backward Euler, 0.5 = Crank-Nicolson
 
 # Mesh
-h = 0.025
+h = 0.025 #0.0025
 mesh_filename = "monodomain_disk_with_hole.msh"
 
 # Initial depolarization: Gaussian bump u0 = A * exp(-|x - x0|^2 / (2 s^2))
