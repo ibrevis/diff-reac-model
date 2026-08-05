@@ -3,5 +3,6 @@ __pycache__/
 *.msh
 *.yml
 *.tex
+fem_comparison_snapshots_fine.npz
 pinn_monodomain_results/
 old_files/
