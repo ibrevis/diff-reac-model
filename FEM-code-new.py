@@ -22,70 +22,49 @@ Output:          monodomain_disk_with_hole.msh, monodomain_disk_with_hole.xdmf/.
 
 from mpi4py import MPI
 import numpy as np
-import gmsh
 
 from dolfinx import fem, geometry, default_scalar_type
-from dolfinx.io import gmsh as gmshio, XDMFFile
+from dolfinx.io import XDMFFile
 from dolfinx.fem.petsc import assemble_matrix, assemble_vector, create_vector
 import ufl
 from petsc4py import PETSc
 
-# ----------------------------------------------------------------------
-# 1. Parameters
-# ----------------------------------------------------------------------
-T         = 5.0          # final time (~ 5 membrane time constants, since r ~ 1)
-num_steps = 250          # number of time steps
-dt        = T / num_steps
-theta     = 1.0          # 1.0 = backward Euler, 0.5 = Crank-Nicolson
-h         = 0.05         # target mesh size (space constant lambda ~ sqrt(a/r) ~ 0.32)
-
-# Initial depolarization: Gaussian bump  u0 = A * exp(-|x - x0|^2 / (2 s^2))
-A_stim, s_stim = 1.0, 0.12
-x0, y0         = 0.4, 0.0        # off-centre so the wave meets the scar and the boundary
-
-# Diffusivity a(x): healthy tissue with a low-conductivity "scar" patch.
-# Stays >= a_scar > 0 everywhere  => uniform ellipticity (well-posedness).
-a_healthy, a_scar = 0.1, 0.01
-xa, ya, wa        = -0.3, 0.0, 0.2
-
-# Reaction r(x): uniform leak / repolarization rate (>= 0 for the maximum principle).
-r_value = 1.0
-
-# Regular-grid snapshots matching the defaults in PINN-code.py.
-grid_size     = 201
-snapshot_times = np.asarray([0.0, 1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
-
-# Circular hole inside the unit disk.
-hole_x, hole_y, hole_r = 0.0, 0.0, 0.2
+from mesh_generator import generate_disk_with_hole_mesh
+from params import (
+    A_stim,
+    T,
+    a_healthy,
+    a_scar,
+    dt,
+    grid_size,
+    h,
+    hole_r,
+    hole_x,
+    hole_y,
+    num_steps,
+    r_value,
+    s_stim,
+    snapshot_times,
+    theta,
+    wa,
+    x0,
+    xa,
+    y0,
+    ya,
+)
 
 # ----------------------------------------------------------------------
 # 2. Mesh: unit disk with a circular hole via gmsh
 # ----------------------------------------------------------------------
 mesh_comm  = MPI.COMM_WORLD
 model_rank = 0
-gmsh.initialize()
-if mesh_comm.rank == model_rank:
-    gmsh.model.add("disk_with_hole")
-    outer = gmsh.model.occ.addDisk(0.0, 0.0, 0.0, 1.0, 1.0)
-    hole = gmsh.model.occ.addDisk(hole_x, hole_y, 0.0, hole_r, hole_r)
-    domain_surfaces, _ = gmsh.model.occ.cut(
-        [(2, outer)],
-        [(2, hole)],
-        removeObject=True,
-        removeTool=True,
-    )
-    gmsh.model.occ.synchronize()
-    surface_tags = [tag for dim, tag in domain_surfaces if dim == 2]
-    gmsh.model.addPhysicalGroup(2, surface_tags, tag=1)
-    gmsh.option.setNumber("Mesh.MeshSizeMin", h)
-    gmsh.option.setNumber("Mesh.MeshSizeMax", h)
-    gmsh.model.mesh.generate(2)
-    gmsh.write("monodomain_disk_with_hole.msh")
-
-mesh_data = gmshio.model_to_mesh(gmsh.model, mesh_comm, model_rank, gdim=2)
-# DOLFINx >= 0.9 returns a MeshData object; <= 0.8 returns a (mesh, cell_tags, facet_tags) tuple
-domain = mesh_data.mesh if hasattr(mesh_data, "mesh") else mesh_data[0]
-gmsh.finalize()
+domain = generate_disk_with_hole_mesh(
+    mesh_comm,
+    model_rank,
+    mesh_size=h,
+    hole_center=(hole_x, hole_y),
+    hole_radius=hole_r,
+)
 
 # ----------------------------------------------------------------------
 # 3. Function space and coefficients
