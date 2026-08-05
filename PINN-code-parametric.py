@@ -5,6 +5,7 @@ import json
 import math
 import os
 import random
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -214,7 +215,7 @@ hidden_layers = 5
 hidden_width = 128
 learning_rate = 1.0e-3
 epochs = 120000
-min_learning_rate = 1.0e-5
+min_learning_rate = 1.0e-6
 
 interior_batch = 8192  # 4096  # 2048
 boundary_batch = 512
@@ -282,6 +283,7 @@ best_epoch = 0
 best_losses: dict[str, float] = {}
 best_state: dict[str, Tensor] | None = None
 
+t0 = time.time()
 for epoch in range(1, epochs + 1):
     model.train()
     interior = sample_interior(
@@ -338,7 +340,7 @@ for epoch in range(1, epochs + 1):
 dir_path = Path("parametric_training")
 os.makedirs(dir_path, exist_ok=True)
 torch.save(best_state, dir_path / "pinn_parametric_best.pt")
-
+print('total time: {:.1f} minutes'.format((time.time() - t0) / 60.0))
 
 # %%
 epochs_history = [row["epoch"] for row in history]

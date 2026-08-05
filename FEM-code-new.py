@@ -1,7 +1,8 @@
 """
-Linearized monodomain (passive cable) reaction-diffusion problem on the unit disk.
+Linearized monodomain (passive cable) reaction-diffusion problem on the unit disk
+with a circular hole.
 
-    u_t - div(a(x) grad u) + r(x) u = 0     in  D = { x^2 + y^2 <= 1 },  t in (0, T]
+    u_t - div(a(x) grad u) + r(x) u = 0     in  D,  t in (0, T]
     (a grad u) . n = 0                       on  dD   (homogeneous Neumann: insulated tissue)
     u(x, 0) = u_0(x)                         (localized depolarization)
 
@@ -15,7 +16,7 @@ Weak form (fully discrete, find u^{n+1} in H^1(D) for all v in H^1(D)):
 Tested with FEniCSx / DOLFINx 0.11  (+ gmsh, petsc4py, mpi4py).
 Run serial:      python FEM-code-new.py
 Run parallel:    mpirun -n 4 python FEM-code-new.py  (PNG plotting is skipped)
-Output:          monodomain_disk.msh, monodomain_disk.xdmf/.h5 (open in ParaView),
+Output:          monodomain_disk_with_hole.msh, monodomain_disk_with_hole.xdmf/.h5 (open in ParaView),
                  mesh.png, u_initial.png, u_final.png, and fem_solution.npz
 """
 
@@ -54,21 +55,32 @@ r_value = 1.0
 grid_size     = 201
 snapshot_times = np.asarray([0.0, 1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
 
+# Circular hole inside the unit disk.
+hole_x, hole_y, hole_r = 0.0, 0.0, 0.2
+
 # ----------------------------------------------------------------------
-# 2. Mesh: unit disk via gmsh
+# 2. Mesh: unit disk with a circular hole via gmsh
 # ----------------------------------------------------------------------
 mesh_comm  = MPI.COMM_WORLD
 model_rank = 0
 gmsh.initialize()
 if mesh_comm.rank == model_rank:
-    gmsh.model.add("disk")
-    disk = gmsh.model.occ.addDisk(0.0, 0.0, 0.0, 1.0, 1.0)   # centre (0,0,0), radii (1,1)
+    gmsh.model.add("disk_with_hole")
+    outer = gmsh.model.occ.addDisk(0.0, 0.0, 0.0, 1.0, 1.0)
+    hole = gmsh.model.occ.addDisk(hole_x, hole_y, 0.0, hole_r, hole_r)
+    domain_surfaces, _ = gmsh.model.occ.cut(
+        [(2, outer)],
+        [(2, hole)],
+        removeObject=True,
+        removeTool=True,
+    )
     gmsh.model.occ.synchronize()
-    gmsh.model.addPhysicalGroup(2, [disk], tag=1)
+    surface_tags = [tag for dim, tag in domain_surfaces if dim == 2]
+    gmsh.model.addPhysicalGroup(2, surface_tags, tag=1)
     gmsh.option.setNumber("Mesh.MeshSizeMin", h)
     gmsh.option.setNumber("Mesh.MeshSizeMax", h)
     gmsh.model.mesh.generate(2)
-    gmsh.write("monodomain_disk.msh")
+    gmsh.write("monodomain_disk_with_hole.msh")
 
 mesh_data = gmshio.model_to_mesh(gmsh.model, mesh_comm, model_rank, gdim=2)
 # DOLFINx >= 0.9 returns a MeshData object; <= 0.8 returns a (mesh, cell_tags, facet_tags) tuple
@@ -110,7 +122,9 @@ def prepare_sampling_grid():
     """Build the PINN grid and locate a FEM cell for every masked point."""
     coordinates = np.linspace(-1.0, 1.0, grid_size, dtype=np.float64)
     x_grid, y_grid = np.meshgrid(coordinates, coordinates, indexing="xy")
-    mask = x_grid**2 + y_grid**2 <= 1.0 + 1.0e-12
+    outer_mask = x_grid**2 + y_grid**2 <= 1.0 + 1.0e-12
+    hole_mask = (x_grid - hole_x) ** 2 + (y_grid - hole_y) ** 2 < hole_r**2 - 1.0e-12
+    mask = outer_mask & ~hole_mask
 
     xy = np.column_stack((x_grid[mask], y_grid[mask]))
     points = np.zeros((len(xy), 3), dtype=domain.geometry.x.dtype)
@@ -254,7 +268,7 @@ solver.getPC().setType(PETSc.PC.Type.LU)
 # ----------------------------------------------------------------------
 # 7. Output
 # ----------------------------------------------------------------------
-xdmf = XDMFFile(domain.comm, "monodomain_disk.xdmf", "w")
+xdmf = XDMFFile(domain.comm, "monodomain_disk_with_hole.xdmf", "w")
 xdmf.write_mesh(domain)
 xdmf.write_function(uh, 0.0)
 
