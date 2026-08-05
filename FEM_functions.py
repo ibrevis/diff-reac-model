@@ -34,8 +34,16 @@ def _triangles_from_vtk_cells(cells):
 
     return np.asarray(triangles, dtype=np.int32)
 
-
-def plot_solution(u, V, title, save=False, filename=None, display=True):
+# def plot_solution(u, V, title, save=False, filename=None, display=True): 
+def plot_solution(
+    u,
+    V,
+    title,
+    save=False,
+    filename=None,
+    display=True,
+    colorbar_label="u",
+):   
     """Plot a finite-element solution, with optional saving and display."""
     if save and filename is None:
         raise ValueError("filename must be provided when save=True")
@@ -55,7 +63,7 @@ def plot_solution(u, V, title, save=False, filename=None, display=True):
     )
 
     try:
-        fig.colorbar(contour, ax=ax, label="u")
+        fig.colorbar(contour, ax=ax, label=colorbar_label)
         ax.set_aspect("equal")
         ax.set_xlabel("x")
         ax.set_ylabel("y")

@@ -3,6 +3,7 @@ __pycache__/
 *.npz
 *.msh
 *.yml
+*.tex
 comparison_results/
 pinn_monodomain_results/
 old_files/

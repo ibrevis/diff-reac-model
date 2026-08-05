@@ -30,6 +30,13 @@ from params import (
     r_value,
     s_stim,
     snapshot_times,
+    source_amplitude,
+    source_period,
+    source_phase,
+    source_spatial_width,
+    source_time_width,
+    source_x,
+    source_y,
     theta,
     x0,
     y0,
@@ -96,6 +103,27 @@ r_coeff = fem.Constant(domain, default_scalar_type(r_value))
 dt_c    = fem.Constant(domain, default_scalar_type(dt))
 theta_c = fem.Constant(domain, default_scalar_type(theta))
 
+# External source F(x, t) = f(x) g(t). The temporal factors are Constants so
+# the compiled linear form can be reused after updating them each time step.
+source_spatial = source_amplitude * ufl.exp(
+    -(
+        (x[0] - source_x) ** 2 + (x[1] - source_y) ** 2
+    ) / (2.0 * source_spatial_width ** 2)
+)
+
+def source_time_profile(t):
+    """Smooth periodic Gaussian-like heartbeat with unit peak value."""
+    phase_angle = np.pi * (t - source_phase) / source_period
+    scaled_width = np.pi * source_time_width / source_period
+    return np.exp(-np.sin(phase_angle) ** 2 / (2.0 * scaled_width ** 2))
+
+source_time_n = fem.Constant(
+    domain, default_scalar_type(source_time_profile(0.0))
+)
+source_time_np1 = fem.Constant(
+    domain, default_scalar_type(source_time_profile(dt))
+)
+
 a1_plot = fem.Function(V)
 a2_plot = fem.Function(V)
 points = V.element.interpolation_points
@@ -120,7 +148,42 @@ uh.interpolate(u0_expr)
 plot_solution(u_n,V, "Initial condition $u_0$",save=True,filename="u_initial.png",display=False)
 
 # ----------------------------------------------------------------------
-# 5. Variational forms (theta-scheme)
+# 5. Source profiles: temporal heartbeat g(t) and spatial Gaussian f(x, y)
+# ----------------------------------------------------------------------
+time_samples = np.linspace(0.0, T, 2001)
+heartbeat_values = source_time_profile(time_samples)
+
+fig, ax_time = plt.subplots(figsize=(6, 5))
+ax_time.plot(time_samples, heartbeat_values, color="tab:red")
+ax_time.set_xlabel("Time $t$")
+ax_time.set_ylabel("$g(t)$")
+ax_time.set_title("Periodic heartbeat $g(t)$")
+ax_time.grid(alpha=0.3)
+fig.tight_layout()
+plt.savefig("source_time_distr.png", dpi=200)
+plt.close(fig)
+
+source_plot = fem.Function(V, name="f")
+source_interpolation_points = V.element.interpolation_points
+source_interpolation_points = (
+    source_interpolation_points()
+    if callable(source_interpolation_points)
+    else source_interpolation_points
+)
+source_plot.interpolate(
+    fem.Expression(source_spatial, source_interpolation_points)
+)
+plot_solution(
+    source_plot,
+    V,
+    "Spatial source $f(x,y)$",
+    colorbar_label="$f(x,y)$",
+    save=True,
+    filename="source_spatial_distr.png"
+)
+
+# ----------------------------------------------------------------------
+# 6. Variational forms (theta-scheme)
 # ----------------------------------------------------------------------
 u, v = ufl.TrialFunction(V), ufl.TestFunction(V)
 
@@ -134,7 +197,14 @@ def B(w):   # weak spatial operator  (a grad w, grad v) + (r w, v)
     return diffusion + reaction
 
 a_form = (u * v + dt_c * theta_c * B(u)) * ufl.dx
-L_form = (u_n * v - dt_c * (1.0 - theta_c) * B(u_n)) * ufl.dx
+source_theta = (
+    theta_c * source_time_np1 + (1.0 - theta_c) * source_time_n
+) * source_spatial
+L_form = (
+    u_n * v
+    - dt_c * (1.0 - theta_c) * B(u_n)
+    + dt_c * source_theta * v
+) * ufl.dx
 
 bilinear_form = fem.form(a_form)
 linear_form   = fem.form(L_form)
@@ -146,7 +216,7 @@ A.assemble()
 b = create_vector(V)
 
 # ----------------------------------------------------------------------
-# 6. Linear solver  (A is time-independent -> factor once, reuse)
+# 7. Linear solver  (A is time-independent -> factor once, reuse)
 # ----------------------------------------------------------------------
 solver = PETSc.KSP().create(domain.comm)
 solver.setOperators(A)
@@ -154,7 +224,7 @@ solver.setType(PETSc.KSP.Type.PREONLY)
 solver.getPC().setType(PETSc.PC.Type.LU)
 
 # # ----------------------------------------------------------------------
-# # 7. Output
+# # 8. Output
 # # ----------------------------------------------------------------------
 # xdmf = XDMFFile(domain.comm, "monodomain_disk_with_hole.xdmf", "w")
 # xdmf.write_mesh(domain)
@@ -220,12 +290,16 @@ if 0 in snapshot_index_by_step:
     )
 
 # ----------------------------------------------------------------------
-# 8. Time-stepping
+# 9. Time-stepping
 # ----------------------------------------------------------------------
 t = 0.0
 for n in range(num_steps):
+    t_n = t
     t += dt
     step = n + 1
+
+    source_time_n.value = default_scalar_type(source_time_profile(t_n))
+    source_time_np1.value = default_scalar_type(source_time_profile(t))
 
     # assemble right-hand side
     with b.localForm() as loc:
@@ -278,7 +352,6 @@ np.savez_compressed(
 print(f"Saved results to {output_file}")
 
 # ----------------------------------------------------------------------
-# 9. Save final-state plot
+# 10. Save final-state plot
 # ----------------------------------------------------------------------
 plot_solution(uh,V, f"Final solution $u(x, t={T})$",save=True,filename="u_final.png",display=False)
-
