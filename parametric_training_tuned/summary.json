@@ -1,0 +1,93 @@
+{
+  "model_spec": {
+    "hidden_layers": 5,
+    "hidden_width": 128
+  },
+  "training_config": {
+    "epochs": 12000,
+    "interior_batch": 8192,
+    "boundary_batch": 512,
+    "validation_interior": 4096,
+    "validation_boundary": 512,
+    "boundary_weight": 1.0,
+    "grad_clip": 5.0,
+    "clip_warmup_epochs": 500,
+    "validation_every": 100,
+    "lr_patience_checks": 10,
+    "early_stop_checks": 25,
+    "validation_min_delta": 0.0001,
+    "log_every": 100,
+    "seed": 42
+  },
+  "device": "cuda",
+  "dtype": "torch.float64",
+  "parameter_bounds": {
+    "a1": [
+      0.1,
+      0.9
+    ],
+    "a2": [
+      0.1,
+      0.9
+    ]
+  },
+  "nominal_parameters": {
+    "a1": 0.8,
+    "a2": 0.6
+  },
+  "initial_condition_max_error": 0.0,
+  "epochs_completed": 12000,
+  "stopped_early": false,
+  "best_epoch": 12000,
+  "best_validation_total": 0.00025517909995140156,
+  "best_validation_losses": {
+    "uniform_pde_loss": 0.00010725033254027405,
+    "source_pde_loss": 0.00024830264974333763,
+    "pulse_pde_loss": 0.0005421507887813368,
+    "boundary_loss": 3.940574050095885e-06,
+    "pde_loss": 0.00025123852590130567,
+    "total_loss": 0.00025517909995140156
+  },
+  "restored_validation_losses": {
+    "uniform_pde_loss": 0.00010725033254027405,
+    "source_pde_loss": 0.00024830264974333763,
+    "pulse_pde_loss": 0.0005421507887813368,
+    "boundary_loss": 3.940574050095885e-06,
+    "pde_loss": 0.00025123852590130567,
+    "total_loss": 0.00025517909995140156
+  },
+  "learning_rate_stage": 1,
+  "elapsed_minutes": 13.339604512850444,
+  "nominal_fem_errors": [
+    {
+      "time": 0.0,
+      "relative_l2": 0.0,
+      "source_relative_l2": 0.0
+    },
+    {
+      "time": 1.0,
+      "relative_l2": 0.29147743062032516,
+      "source_relative_l2": 0.06665693601741376
+    },
+    {
+      "time": 2.0,
+      "relative_l2": 0.20760896875537874,
+      "source_relative_l2": 0.09044091758834713
+    },
+    {
+      "time": 3.0,
+      "relative_l2": 0.2202965684264033,
+      "source_relative_l2": 0.029930718246587818
+    },
+    {
+      "time": 4.0,
+      "relative_l2": 0.14410907385966273,
+      "source_relative_l2": 0.02572759797140309
+    },
+    {
+      "time": 5.0,
+      "relative_l2": 0.22351955187242187,
+      "source_relative_l2": 0.05057200752841665
+    }
+  ]
+}
