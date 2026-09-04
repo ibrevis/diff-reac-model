@@ -4,7 +4,7 @@ import numpy as np
 
 # Time integration
 T = 5.0          # final time (~ 5 membrane time constants, since r ~ 1)
-num_steps = 500  # number of time steps
+num_steps = 1000 #500  # number of time steps
 dt = T / num_steps
 theta = 1.0      # 1.0 = backward Euler, 0.5 = Crank-Nicolson
 
@@ -13,15 +13,15 @@ h = 0.025 #0.0025
 mesh_filename = "monodomain_disk_with_hole.msh"
 
 # Initial depolarization: Gaussian bump u0 = A * exp(-|x - x0|^2 / (2 s^2))
-A_stim, s_stim = 0.0, 0.12 #1.0, 0.12
+A_stim, s_stim = 1.0, 0.12 #1.0, 0.12
 x0, y0 = 0.4, 0.0
 
 # External source F(x, t) = f(x) g(t): a spatial Gaussian driven by a
 # smooth periodic Gaussian-like pulse. The default period gives one beat/s.
-source_amplitude = 1.0
+source_amplitude = 0.0 # 1.0
 source_x, source_y = 0.4, 0.0
 source_spatial_width = 0.12
-source_period = 1.0
+source_period = 1.5
 source_time_width = 0.05
 source_phase = 0.0
 
@@ -30,7 +30,7 @@ a_healthy, a_scar = 0.1, 0.01
 xa, ya, wa = -0.3, 0.0, 0.2
 
 # Optional anisotropic diffusivity values used by the notebook variant.
-a1, a2 = 0.8, 0.6
+a1, a2 = 0.8, 0.6 #0.4, 0.3 #0.8, 0.6
 
 # Reaction r(x): uniform leak / repolarization rate.
 r_value = 1.0

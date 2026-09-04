@@ -1,4 +1,4 @@
-"""Recover the anisotropic Nagumo diffusion coefficients from sensor data."""
+"""Recover Nagumo diffusion coefficients without parameter regularization."""
 
 from __future__ import annotations
 
@@ -17,18 +17,18 @@ except ImportError:
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_OBSERVATIONS = SCRIPT_DIR / "observations_coarse.npy"
-DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "inverse_output"
+DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "inverse_output_no_reg"
 HISTORY_COLUMNS = (
     "evaluation",
     "a1",
     "a2",
-    "data_norm",
-    "regularization_norm",
-    "total_residual_norm",
+    "weighted_data_norm",
     "objective",
     "forward_solves",
     "cache_hit",
 )
+CONFIDENCE_Z_95 = 1.96
+CHI_SQUARE_2_95 = 5.991464547107979
 
 
 def load_observation_data(
@@ -70,8 +70,7 @@ def add_observation_noise(
     noise_seed: int,
 ) -> np.ndarray:
     """Return observations with reproducible independent Gaussian noise."""
-    if not np.isfinite(noise_std) or noise_std < 0.0:
-        raise ValueError(f"noise_std must be finite and non-negative; got {noise_std}")
+    _validate_noise_std(noise_std)
 
     values = np.asarray(observed, dtype=np.float64)
     rng = np.random.default_rng(noise_seed)
@@ -79,18 +78,15 @@ def add_observation_noise(
     return values + noise
 
 
-def build_regularized_residual(
+def build_data_residual(
     predicted: np.ndarray,
     observed: np.ndarray,
-    theta: Sequence[float],
-    theta_ref: Sequence[float],
-    lambda_reg: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return total, data, and zero-order Tikhonov residual vectors."""
+    noise_std: float,
+) -> np.ndarray:
+    """Return the flattened residual weighted by the known noise deviation."""
+    _validate_noise_std(noise_std)
     predicted = np.asarray(predicted, dtype=np.float64)
     observed = np.asarray(observed, dtype=np.float64)
-    theta = np.asarray(theta, dtype=np.float64)
-    theta_ref = np.asarray(theta_ref, dtype=np.float64)
 
     if predicted.shape != observed.shape:
         raise ValueError(
@@ -99,19 +95,16 @@ def build_regularized_residual(
         )
     if predicted.ndim != 2:
         raise ValueError("Predicted and observed arrays must be two-dimensional")
-    if theta.shape != (2,) or theta_ref.shape != (2,):
-        raise ValueError("theta and theta_ref must each contain exactly two values")
     if not np.all(np.isfinite(predicted)):
         raise FloatingPointError("Predicted observations contain non-finite values")
     if not np.all(np.isfinite(observed)):
         raise FloatingPointError("Observed values contain non-finite values")
-    if not np.isfinite(lambda_reg) or lambda_reg < 0.0:
-        raise ValueError(f"lambda_reg must be finite and non-negative; got {lambda_reg}")
+    return (predicted - observed).ravel(order="C") / noise_std
 
-    data_residual = (predicted - observed).ravel(order="C")
-    regularization_residual = np.sqrt(lambda_reg) * (theta - theta_ref)
-    residual = np.concatenate((data_residual, regularization_residual))
-    return residual, data_residual, regularization_residual
+
+def _validate_noise_std(noise_std: float) -> None:
+    if not np.isfinite(noise_std) or noise_std <= 0.0:
+        raise ValueError(f"noise_std must be finite and strictly positive; got {noise_std}")
 
 
 class ExactForwardCache:
@@ -148,33 +141,159 @@ class ExactForwardCache:
         return prediction, False
 
 
+@dataclass(frozen=True)
+class FisherInformationResult:
+    sensitivity_matrix: np.ndarray
+    difference_steps: np.ndarray
+    fisher_matrix: np.ndarray
+    rank: int
+    condition_number: float
+    covariance_matrix: np.ndarray
+    standard_errors: np.ndarray
+    confidence_intervals_95: np.ndarray
+
+
+@dataclass(frozen=True)
+class FisherEllipseGeometry:
+    center: np.ndarray
+    eigenvalues: np.ndarray
+    semiaxis_lengths: np.ndarray
+    angle_degrees: float
+
+
+def compute_fisher_ellipse_geometry(
+    fisher_matrix: np.ndarray,
+    center: Sequence[float],
+) -> FisherEllipseGeometry | None:
+    """Return the 95% joint Fisher ellipse geometry, if it is identifiable."""
+    matrix = np.asarray(fisher_matrix, dtype=np.float64)
+    center_values = np.asarray(center, dtype=np.float64)
+    if matrix.shape != (2, 2):
+        raise ValueError(f"fisher_matrix must have shape (2, 2); got {matrix.shape}")
+    if center_values.shape != (2,):
+        raise ValueError(f"ellipse center must have shape (2,); got {center_values.shape}")
+    if not np.all(np.isfinite(center_values)):
+        raise ValueError("ellipse center must be finite")
+    if not np.all(np.isfinite(matrix)):
+        return None
+
+    symmetric_matrix = 0.5 * (matrix + matrix.T)
+    if np.linalg.matrix_rank(symmetric_matrix) < 2:
+        return None
+    eigenvalues, eigenvectors = np.linalg.eigh(symmetric_matrix)
+    if np.any(~np.isfinite(eigenvalues)) or np.any(eigenvalues <= 0.0):
+        return None
+
+    semiaxis_lengths = np.sqrt(CHI_SQUARE_2_95 / eigenvalues)
+    major_axis_vector = eigenvectors[:, 0]
+    angle_degrees = float(
+        np.degrees(np.arctan2(major_axis_vector[1], major_axis_vector[0]))
+    )
+    return FisherEllipseGeometry(
+        center=center_values.copy(),
+        eigenvalues=eigenvalues,
+        semiaxis_lengths=semiaxis_lengths,
+        angle_degrees=angle_degrees,
+    )
+
+
+def compute_fisher_information(
+    cache: ExactForwardCache,
+    theta: Sequence[float],
+    noise_std: float,
+    lower_bounds: Sequence[float],
+    upper_bounds: Sequence[float],
+    relative_step: float,
+) -> FisherInformationResult:
+    """Compute local Fisher information using bound-aware central differences."""
+    _validate_noise_std(noise_std)
+    values = np.asarray(theta, dtype=np.float64)
+    lower = np.asarray(lower_bounds, dtype=np.float64)
+    upper = np.asarray(upper_bounds, dtype=np.float64)
+    if any(array.shape != (2,) for array in (values, lower, upper)):
+        raise ValueError("theta and Fisher bounds must each contain two values")
+    if not all(np.all(np.isfinite(array)) for array in (values, lower, upper)):
+        raise ValueError("theta and Fisher bounds must be finite")
+    if np.any(upper <= lower) or np.any(values < lower) or np.any(values > upper):
+        raise ValueError("theta must lie within valid Fisher bounds")
+    if not np.isfinite(relative_step) or relative_step <= 0.0:
+        raise ValueError("Fisher relative_step must be finite and positive")
+
+    scales = np.maximum(1.0, np.abs(values))
+    requested_steps = relative_step * scales
+    distances_to_bounds = np.minimum(values - lower, upper - values)
+    difference_steps = np.minimum(requested_steps, 0.5 * distances_to_bounds)
+    minimum_steps = 64.0 * np.finfo(np.float64).eps * scales
+    invalid = difference_steps <= minimum_steps
+    if np.any(invalid):
+        names = ", ".join(("a1", "a2")[index] for index in np.flatnonzero(invalid))
+        raise RuntimeError(
+            "Cannot form a numerically meaningful central Fisher difference for "
+            f"{names}; the recovered value is too close to a bound"
+        )
+
+    sensitivity_columns: list[np.ndarray] = []
+    prediction_shape: tuple[int, ...] | None = None
+    for index, step in enumerate(difference_steps):
+        plus = values.copy()
+        minus = values.copy()
+        plus[index] += step
+        minus[index] -= step
+        prediction_plus, _ = cache.predict(plus)
+        prediction_minus, _ = cache.predict(minus)
+        if prediction_plus.shape != prediction_minus.shape:
+            raise RuntimeError("Central Fisher predictions have inconsistent shapes")
+        if prediction_shape is None:
+            prediction_shape = prediction_plus.shape
+        elif prediction_plus.shape != prediction_shape:
+            raise RuntimeError("Fisher predictions changed shape between parameters")
+        derivative = (prediction_plus - prediction_minus) / (2.0 * step)
+        sensitivity_columns.append(derivative.ravel(order="C"))
+
+    sensitivity_matrix = np.column_stack(sensitivity_columns)
+    fisher_matrix = (sensitivity_matrix.T @ sensitivity_matrix) / noise_std**2
+    rank = int(np.linalg.matrix_rank(fisher_matrix))
+    condition_number = float(np.linalg.cond(fisher_matrix))
+
+    covariance_matrix = np.full((2, 2), np.nan, dtype=np.float64)
+    standard_errors = np.full(2, np.nan, dtype=np.float64)
+    confidence_intervals_95 = np.full((2, 2), np.nan, dtype=np.float64)
+    if rank == 2:
+        covariance_matrix = np.linalg.inv(fisher_matrix)
+        standard_errors = np.sqrt(np.maximum(np.diag(covariance_matrix), 0.0))
+        confidence_intervals_95[:, 0] = values - CONFIDENCE_Z_95 * standard_errors
+        confidence_intervals_95[:, 1] = values + CONFIDENCE_Z_95 * standard_errors
+
+    return FisherInformationResult(
+        sensitivity_matrix=sensitivity_matrix,
+        difference_steps=difference_steps,
+        fisher_matrix=fisher_matrix,
+        rank=rank,
+        condition_number=condition_number,
+        covariance_matrix=covariance_matrix,
+        standard_errors=standard_errors,
+        confidence_intervals_95=confidence_intervals_95,
+    )
+
+
 @dataclass
 class ResidualEvaluator:
     observed: np.ndarray
-    theta_ref: np.ndarray
-    lambda_reg: float
+    noise_std: float
     cache: ExactForwardCache
     print_diagnostics: bool = True
 
     def __post_init__(self) -> None:
         self.observed = np.asarray(self.observed, dtype=np.float64)
-        self.theta_ref = np.asarray(self.theta_ref, dtype=np.float64)
+        _validate_noise_std(self.noise_std)
         self.history: list[list[float]] = []
 
     def __call__(self, theta: Sequence[float]) -> np.ndarray:
         values = np.asarray(theta, dtype=np.float64)
         predicted, cache_hit = self.cache.predict(values)
-        residual, data_residual, regularization_residual = build_regularized_residual(
-            predicted,
-            self.observed,
-            values,
-            self.theta_ref,
-            self.lambda_reg,
-        )
-        data_norm = float(np.linalg.norm(data_residual))
-        reg_norm = float(np.linalg.norm(regularization_residual))
-        total_norm = float(np.linalg.norm(residual))
-        objective = 0.5 * total_norm**2
+        residual = build_data_residual(predicted, self.observed, self.noise_std)
+        data_norm = float(np.linalg.norm(residual))
+        objective = 0.5 * data_norm**2
         evaluation = len(self.history) + 1
         self.history.append(
             [
@@ -182,8 +301,6 @@ class ResidualEvaluator:
                 float(values[0]),
                 float(values[1]),
                 data_norm,
-                reg_norm,
-                total_norm,
                 objective,
                 float(self.cache.solve_count),
                 float(cache_hit),
@@ -194,9 +311,7 @@ class ResidualEvaluator:
                 f"eval {evaluation}:\n"
                 f"    a1 = {values[0]:.12g}\n"
                 f"    a2 = {values[1]:.12g}\n"
-                f"    ||r_data|| = {data_norm:.12e}\n"
-                f"    ||r_reg||  = {reg_norm:.12e}\n"
-                f"    ||r||       = {total_norm:.12e}\n"
+                f"    ||r_data / sigma|| = {data_norm:.12e}\n"
                 f"    J           = {objective:.12e}\n"
                 f"    forward solves = {self.cache.solve_count}"
                 + (" (cache hit)" if cache_hit else "")
@@ -307,6 +422,7 @@ def plot_results(
     predicted: np.ndarray,
     history: np.ndarray,
     true_theta: np.ndarray,
+    confidence_intervals_95: np.ndarray,
 ) -> None:
     import matplotlib
 
@@ -354,9 +470,28 @@ def plot_results(
 
     fig, axes = plt.subplots(2, 1, figsize=(9, 8), sharex=True)
     evaluations = history[:, 0]
-    axes[0].semilogy(evaluations, np.maximum(history[:, 6], np.finfo(float).tiny))
+    axes[0].semilogy(evaluations, np.maximum(history[:, 4], np.finfo(float).tiny))
     axes[0].set(ylabel="Objective", title="Optimization history")
     axes[0].grid(alpha=0.25)
+    confidence_intervals_95 = np.asarray(
+        confidence_intervals_95, dtype=np.float64
+    )
+    if confidence_intervals_95.shape != (2, 2):
+        raise ValueError(
+            "confidence_intervals_95 must have shape (2, 2); "
+            f"got {confidence_intervals_95.shape}"
+        )
+    for index, color in enumerate(("C0", "C1")):
+        interval = confidence_intervals_95[index]
+        if np.all(np.isfinite(interval)):
+            axes[1].axhspan(
+                interval[0],
+                interval[1],
+                color=color,
+                alpha=0.15,
+                zorder=0,
+                label=f"a{index + 1} 95% CI",
+            )
     axes[1].plot(evaluations, history[:, 1], marker=".", color="C0", label="a1")
     axes[1].plot(evaluations, history[:, 2], marker=".", color="C1", label="a2")
     axes[1].axhline(
@@ -373,13 +508,94 @@ def plot_results(
     plt.close(fig)
 
 
+def plot_fisher_confidence_ellipse(
+    output_dir: Path,
+    estimated_theta: np.ndarray,
+    true_theta: np.ndarray,
+    fisher_matrix: np.ndarray,
+) -> Path:
+    """Plot the recovered parameters and their joint 95% Fisher ellipse."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+    from matplotlib.patches import Ellipse
+
+    estimated_theta = np.asarray(estimated_theta, dtype=np.float64)
+    true_theta = np.asarray(true_theta, dtype=np.float64)
+    if true_theta.shape != (2,) or not np.all(np.isfinite(true_theta)):
+        raise ValueError("true_theta must contain two finite values")
+    geometry = compute_fisher_ellipse_geometry(fisher_matrix, estimated_theta)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig, axis = plt.subplots(figsize=(7, 7))
+    if geometry is not None:
+        ellipse = Ellipse(
+            xy=geometry.center,
+            width=2.0 * geometry.semiaxis_lengths[0],
+            height=2.0 * geometry.semiaxis_lengths[1],
+            angle=geometry.angle_degrees,
+            facecolor="C0",
+            edgecolor="C0",
+            alpha=0.2,
+            linewidth=1.5,
+            label="95% Fisher confidence ellipse",
+        )
+        axis.add_patch(ellipse)
+    else:
+        axis.text(
+            0.5,
+            0.05,
+            "95% Fisher confidence ellipse unavailable",
+            transform=axis.transAxes,
+            horizontalalignment="center",
+            color="C3",
+        )
+
+    axis.scatter(
+        estimated_theta[0],
+        estimated_theta[1],
+        marker="X",
+        s=90,
+        color="C0",
+        edgecolor="black",
+        linewidth=0.7,
+        zorder=3,
+        label="estimated parameters",
+    )
+    axis.scatter(
+        true_theta[0],
+        true_theta[1],
+        marker="*",
+        s=140,
+        color="C3",
+        edgecolor="black",
+        linewidth=0.7,
+        zorder=3,
+        label="true parameters",
+    )
+    axis.autoscale_view()
+    axis.margins(0.15)
+    axis.set(
+        xlabel=r"$a_1$",
+        ylabel=r"$a_2$",
+        title="95% joint Fisher confidence ellipse",
+    )
+    axis.set_aspect("equal", adjustable="box")
+    axis.grid(alpha=0.25)
+    axis.legend()
+    fig.tight_layout()
+    output_path = output_dir / "fisher_confidence_ellipse.png"
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+    return output_path
+
+
 def save_results(
     output_dir: Path,
     result,
     *,
     initial_guess: np.ndarray,
-    theta_ref: np.ndarray,
-    lambda_reg: float,
     noise_std: float,
     noise_seed: int,
     lower_bounds: np.ndarray,
@@ -390,19 +606,17 @@ def save_results(
     history: np.ndarray,
     forward_solve_count: int,
     preflight_report: dict[str, float],
+    fisher_result: FisherInformationResult,
     true_theta: np.ndarray | None,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
-    _, data_residual, regularization_residual = build_regularized_residual(
-        predicted, observed, result.x, theta_ref, lambda_reg
-    )
+    weighted_data_residual = build_data_residual(predicted, observed, noise_std)
+    data_residual = weighted_data_residual * noise_std
     result_path = output_dir / "inverse_result.npz"
     payload: dict[str, np.ndarray | float | int | bool | str] = {
         "a1": float(result.x[0]),
         "a2": float(result.x[1]),
         "initial_guess": initial_guess,
-        "theta_ref": theta_ref,
-        "lambda_reg": float(lambda_reg),
         "noise_std": float(noise_std),
         "noise_seed": int(noise_seed),
         "lower_bounds": lower_bounds,
@@ -417,7 +631,17 @@ def save_results(
         "optimization_message": str(result.message),
         "forward_solve_count": int(forward_solve_count),
         "final_data_residual_norm": float(np.linalg.norm(data_residual)),
-        "final_regularization_norm": float(np.linalg.norm(regularization_residual)),
+        "final_weighted_data_residual_norm": float(
+            np.linalg.norm(weighted_data_residual)
+        ),
+        "fisher_sensitivity_matrix": fisher_result.sensitivity_matrix,
+        "fisher_difference_steps": fisher_result.difference_steps,
+        "fisher_information_matrix": fisher_result.fisher_matrix,
+        "fisher_rank": fisher_result.rank,
+        "fisher_condition_number": fisher_result.condition_number,
+        "parameter_covariance_matrix": fisher_result.covariance_matrix,
+        "parameter_standard_errors": fisher_result.standard_errors,
+        "parameter_confidence_intervals_95": fisher_result.confidence_intervals_95,
         "history": history,
         "history_columns": np.asarray(HISTORY_COLUMNS),
     }
@@ -449,11 +673,15 @@ def run_inverse_problem(args: argparse.Namespace):
     )
     times = np.asarray(params.observation_times, dtype=np.float64)
     initial_guess = np.asarray((args.a1_init, args.a2_init), dtype=np.float64)
-    theta_ref = np.asarray((args.a1_ref, args.a2_ref), dtype=np.float64)
     lower_bounds = np.asarray((args.a1_lower, args.a2_lower), dtype=np.float64)
     upper_bounds = np.asarray((args.a1_upper, args.a2_upper), dtype=np.float64)
     _validate_configuration(
-        initial_guess, theta_ref, args.lambda_reg, lower_bounds, upper_bounds, args.diff_step
+        initial_guess,
+        lower_bounds,
+        upper_bounds,
+        args.diff_step,
+        args.noise_std,
+        args.fisher_diff_step,
     )
 
     model = NagumoForwardModel(
@@ -477,7 +705,7 @@ def run_inverse_problem(args: argparse.Namespace):
     from scipy.optimize import least_squares
 
     cache = ExactForwardCache(lambda a1, a2: model.solve(a1, a2, times))
-    evaluator = ResidualEvaluator(observed, theta_ref, args.lambda_reg, cache)
+    evaluator = ResidualEvaluator(observed, args.noise_std, cache)
     result = least_squares(
         evaluator,
         x0=initial_guess,
@@ -491,8 +719,17 @@ def run_inverse_problem(args: argparse.Namespace):
         verbose=args.optimizer_verbose,
     )
     predicted, _ = cache.predict(result.x)
-    residual, data_residual, regularization_residual = build_regularized_residual(
-        predicted, observed, result.x, theta_ref, args.lambda_reg
+    weighted_data_residual = build_data_residual(
+        predicted, observed, args.noise_std
+    )
+    data_residual = weighted_data_residual * args.noise_std
+    fisher_result = compute_fisher_information(
+        cache,
+        result.x,
+        args.noise_std,
+        lower_bounds,
+        upper_bounds,
+        args.fisher_diff_step,
     )
     history = evaluator.history_array()
     output_dir = Path(args.output_dir).resolve()
@@ -500,8 +737,6 @@ def run_inverse_problem(args: argparse.Namespace):
         output_dir,
         result,
         initial_guess=initial_guess,
-        theta_ref=theta_ref,
-        lambda_reg=args.lambda_reg,
         noise_std=args.noise_std,
         noise_seed=args.noise_seed,
         lower_bounds=lower_bounds,
@@ -512,9 +747,24 @@ def run_inverse_problem(args: argparse.Namespace):
         history=history,
         forward_solve_count=cache.solve_count,
         preflight_report=preflight_report,
+        fisher_result=fisher_result,
         true_theta=true_theta,
     )
-    plot_results(output_dir, times, observed, predicted, history, true_theta)
+    plot_results(
+        output_dir,
+        times,
+        observed,
+        predicted,
+        history,
+        true_theta,
+        fisher_result.confidence_intervals_95,
+    )
+    plot_fisher_confidence_ellipse(
+        output_dir,
+        result.x,
+        true_theta,
+        fisher_result.fisher_matrix,
+    )
 
     relative_error_a1 = abs(result.x[0] - true_theta[0]) / abs(true_theta[0])
     relative_error_a2 = abs(result.x[1] - true_theta[1]) / abs(true_theta[1])
@@ -526,16 +776,33 @@ def run_inverse_problem(args: argparse.Namespace):
     print(f"Relative error a1: {relative_error_a1:.12e}")
     print(f"Relative error a2: {relative_error_a2:.12e}")
     print(f"Initial guess: {initial_guess}")
-    print(f"Reference parameters: {theta_ref}")
-    print(f"Regularization lambda: {args.lambda_reg:.12g}")
     print(f"Observation noise standard deviation: {args.noise_std:.12g}")
     print(f"Observation noise seed: {args.noise_seed}")
+    print(f"Fisher relative difference step: {args.fisher_diff_step:.12g}")
     print(f"Bounds: lower={lower_bounds}, upper={upper_bounds}")
     print(f"Number of forward solves: {cache.solve_count}")
     print(f"Final data residual norm: {np.linalg.norm(data_residual):.12e}")
-    print(f"Final regularization norm: {np.linalg.norm(regularization_residual):.12e}")
-    print(f"Final total residual norm: {np.linalg.norm(residual):.12e}")
+    print(
+        "Final weighted data residual norm: "
+        f"{np.linalg.norm(weighted_data_residual):.12e}"
+    )
     print(f"Final objective: {result.cost:.12e}")
+    print("Fisher information matrix:")
+    print(fisher_result.fisher_matrix)
+    print(f"Fisher numerical rank: {fisher_result.rank}")
+    print(f"Fisher condition number: {fisher_result.condition_number:.12e}")
+    if fisher_result.rank < 2:
+        print(
+            "WARNING: Fisher information is rank deficient; parameter standard "
+            "errors and 95% confidence intervals are unavailable."
+        )
+    else:
+        for index, name in enumerate(("a1", "a2")):
+            lower, upper = fisher_result.confidence_intervals_95[index]
+            print(
+                f"{name} standard error: {fisher_result.standard_errors[index]:.12e}"
+            )
+            print(f"{name} 95% confidence interval: [{lower:.12g}, {upper:.12g}]")
     print(f"Saved result: {result_path}")
     print(f"Saved plots: {output_dir}")
     return result
@@ -543,13 +810,13 @@ def run_inverse_problem(args: argparse.Namespace):
 
 def _validate_configuration(
     initial_guess: np.ndarray,
-    theta_ref: np.ndarray,
-    lambda_reg: float,
     lower_bounds: np.ndarray,
     upper_bounds: np.ndarray,
     diff_step: float,
+    noise_std: float,
+    fisher_diff_step: float,
 ) -> None:
-    arrays = (initial_guess, theta_ref, lower_bounds, upper_bounds)
+    arrays = (initial_guess, lower_bounds, upper_bounds)
     if any(values.shape != (2,) or not np.all(np.isfinite(values)) for values in arrays):
         raise ValueError("All parameter vectors must contain exactly two finite values")
     if np.any(lower_bounds <= 0.0):
@@ -558,29 +825,28 @@ def _validate_configuration(
         raise ValueError("Each upper bound must be greater than its lower bound")
     if np.any(initial_guess < lower_bounds) or np.any(initial_guess > upper_bounds):
         raise ValueError("Initial guess must lie within the supplied bounds")
-    if np.any(theta_ref <= 0.0):
-        raise ValueError("Reference diffusion coefficients must be positive")
-    if not np.isfinite(lambda_reg) or lambda_reg < 0.0:
-        raise ValueError("lambda_reg must be finite and non-negative")
     if not np.isfinite(diff_step) or diff_step <= 0.0:
         raise ValueError("diff_step must be finite and positive")
+    _validate_noise_std(noise_std)
+    if not np.isfinite(fisher_diff_step) or fisher_diff_step <= 0.0:
+        raise ValueError("fisher_diff_step must be finite and positive")
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Recover constant anisotropic diffusion coefficients in the Nagumo model."
+        description=(
+            "Recover constant anisotropic diffusion coefficients in the Nagumo model "
+            "without parameter regularization."
+        )
     )
     parser.add_argument("--observations", type=Path, default=DEFAULT_OBSERVATIONS)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--a1-init", type=float, default=1.0)
     parser.add_argument("--a2-init", type=float, default=1.0)
-    parser.add_argument("--a1-ref", type=float, default=1.0)
-    parser.add_argument("--a2-ref", type=float, default=1.0)
-    parser.add_argument("--lambda-reg", type=float, default=1.0e-4)
     parser.add_argument(
         "--noise-std",
         type=float,
-        default=0.0,
+        default=0.005,
         help="standard deviation of additive Gaussian observation noise",
     )
     parser.add_argument(
@@ -594,6 +860,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--a1-upper", type=float, default=2.0)
     parser.add_argument("--a2-upper", type=float, default=2.0)
     parser.add_argument("--diff-step", type=float, default=1.0e-3)
+    parser.add_argument(
+        "--fisher-diff-step",
+        type=float,
+        default=1.0e-3,
+        help="relative central-difference step for Fisher sensitivities",
+    )
     parser.add_argument("--ftol", type=float, default=1.0e-8)
     parser.add_argument("--xtol", type=float, default=1.0e-8)
     parser.add_argument("--gtol", type=float, default=1.0e-8)

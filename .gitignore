@@ -3,6 +3,7 @@ __pycache__/
 *.msh
 *.yml
 *.tex
+inverse_problem_mathematical_details.pdf
 fem_comparison_snapshots_fine.npz
 pinn_monodomain_results/
 old_files/

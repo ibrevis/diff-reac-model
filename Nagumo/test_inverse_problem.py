@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -12,19 +14,46 @@ try:
     from . import params
     from .inverse_problem import (
         ExactForwardCache,
+        add_observation_noise,
         build_regularized_residual,
         load_observation_data,
+        plot_results,
     )
 except ImportError:
     import params  # type: ignore[no-redef]
     from inverse_problem import (  # type: ignore[no-redef]
         ExactForwardCache,
+        add_observation_noise,
         build_regularized_residual,
         load_observation_data,
+        plot_results,
     )
 
 
 class InverseUtilitiesTest(unittest.TestCase):
+    def test_zero_observation_noise_is_unchanged(self) -> None:
+        observed = np.array([[1.0, 2.0], [3.0, 4.0]])
+        noisy = add_observation_noise(observed, noise_std=0.0, noise_seed=42)
+        np.testing.assert_array_equal(noisy, observed)
+
+    def test_observation_noise_is_seeded_and_does_not_modify_input(self) -> None:
+        observed = np.array([[1.0, 2.0], [3.0, 4.0]])
+        original = observed.copy()
+        first = add_observation_noise(observed, noise_std=0.1, noise_seed=42)
+        second = add_observation_noise(observed, noise_std=0.1, noise_seed=42)
+        different = add_observation_noise(observed, noise_std=0.1, noise_seed=43)
+
+        np.testing.assert_array_equal(observed, original)
+        np.testing.assert_array_equal(first, second)
+        self.assertFalse(np.array_equal(first, different))
+
+    def test_observation_noise_rejects_invalid_standard_deviation(self) -> None:
+        observed = np.ones((2, 2))
+        for noise_std in (-0.1, np.nan, np.inf, -np.inf):
+            with self.subTest(noise_std=noise_std):
+                with self.assertRaises(ValueError):
+                    add_observation_noise(observed, noise_std, noise_seed=42)
+
     def test_observation_layout(self) -> None:
         path = Path(__file__).resolve().parent / "observations_coarse.npy"
         observations = load_observation_data(path)
@@ -33,6 +62,50 @@ class InverseUtilitiesTest(unittest.TestCase):
         self.assertTrue(np.isfinite(observations).all())
         self.assertAlmostEqual(params.observation_times[0], params.dt)
         self.assertAlmostEqual(params.observation_times[-1], params.T)
+
+    def test_optimization_history_plots_true_coefficients(self) -> None:
+        from matplotlib.axes import Axes
+
+        times = np.array([0.1, 0.2])
+        observed = np.zeros((2, len(params.observation_points)))
+        predicted = np.ones_like(observed)
+        history = np.zeros((2, 9))
+        history[:, 0] = (1.0, 2.0)
+        history[:, 1] = (1.0, 0.8)
+        history[:, 2] = (1.0, 0.6)
+        history[:, 6] = (1.0, 0.5)
+        true_theta = np.array([params.a1, params.a2])
+        horizontal_lines: list[tuple[float, dict[str, object]]] = []
+        original_axhline = Axes.axhline
+
+        def recording_axhline(axis, y=0, xmin=0, xmax=1, **kwargs):
+            horizontal_lines.append((float(y), kwargs.copy()))
+            return original_axhline(axis, y, xmin, xmax, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            output_dir = Path(temporary_dir)
+            with patch.object(Axes, "axhline", new=recording_axhline):
+                plot_results(
+                    output_dir,
+                    times,
+                    observed,
+                    predicted,
+                    history,
+                    true_theta,
+                )
+            self.assertTrue((output_dir / "optimization_history.png").is_file())
+
+        true_lines = [
+            (value, options)
+            for value, options in horizontal_lines
+            if options.get("linestyle") == "--"
+        ]
+        self.assertEqual([value for value, _ in true_lines], [params.a1, params.a2])
+        self.assertEqual([options["color"] for _, options in true_lines], ["C0", "C1"])
+        self.assertEqual(
+            [options["label"] for _, options in true_lines],
+            ["true a1", "true a2"],
+        )
 
     def test_residual_order_and_regularization(self) -> None:
         observed = np.array([[1.0, 2.0], [3.0, 4.0]])

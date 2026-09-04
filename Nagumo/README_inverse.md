@@ -27,6 +27,18 @@ python Nagumo/inverse_problem.py \
   --a1-upper 2.0 --a2-upper 2.0
 ```
 
+Add reproducible, independent Gaussian noise to every loaded observation with
+`--noise-std`. The value is an absolute standard deviation, and `--noise-seed`
+selects the random realization:
+
+```bash
+python Nagumo/inverse_problem.py --noise-std 0.01 --noise-seed 42
+```
+
+Noise is disabled by default (`--noise-std 0.0`). The preflight validates the
+original observation file, while optimization and generated results use the
+noisy observations.
+
 The minimized objective is
 
 ```text
@@ -34,9 +46,10 @@ The minimized objective is
        + lambda_reg * ||theta - theta_ref||_2^2).
 ```
 
-No noise standard deviation is recorded in the repository, so the data residual
-is unweighted. The known synthetic values in `params.py` are used only by the
-preflight and final reporting, never by the optimizer.
+The source observation file does not record a measurement-noise standard
+deviation, so the data residual remains unweighted. The optional synthetic noise
+settings are saved with the results. The known synthetic values in `params.py`
+are used only by the preflight and final reporting, never by the optimizer.
 
 Results and noninteractive diagnostic figures are written to
 `Nagumo/inverse_output/` by default. Use `--help` for all bounds, tolerances,
